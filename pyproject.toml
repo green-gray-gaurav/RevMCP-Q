@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rmcpq"
+version = "0.1.0"
+description = "A durable local reverse-MCP task broker"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=2.3,<3",
+  "starlette>=0.50,<2",
+  "uvicorn>=0.38,<1",
+  "pydantic>=2.12,<3",
+  "httpx>=0.28,<1",
+]
+
+[project.scripts]
+rmcpq = "rmcpq.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "ruff>=0.14,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rmcpq"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
