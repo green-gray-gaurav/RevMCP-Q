@@ -29,7 +29,10 @@ async def eventually(check, timeout=3):
 
 async def test_real_mcp_wait_wakes_and_producer_reads_result(server):
     async with Client(server.url + "/mcp", read_timeout_seconds=5) as worker:
-        ready = await tool(worker, "start", queues=["summaries"], worker_id="worker")
+        ready = await tool(
+            worker, "start", queues=["summaries"], worker_id="worker", model="test-model"
+        )
+        assert ready["model"] == "test-model"
         assert ready["next_action"]["tool"] == "wait_for_job"
         pending = asyncio.create_task(
             tool(worker, "wait_for_job", worker_id="worker", wait_seconds=2)
@@ -76,6 +79,8 @@ async def test_real_mcp_wait_wakes_and_producer_reads_result(server):
                 == submitted
             )
             saved = (await producer.get("/v1/jobs/" + job["id"])).json()
+            assert saved["model"] == "test-model"
+            assert saved["history"][0]["model"] == "test-model"
             assert saved["result"] == "A useful summary"
             assert saved["history"][0]["status"] == "completed"
             assert token not in json.dumps(saved)

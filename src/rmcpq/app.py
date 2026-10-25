@@ -12,11 +12,13 @@ from pydantic import ValidationError
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 
 from . import __version__
 from .broker import Broker
+from .controls import Launcher, LaunchInput, ModelCatalog
 from .mcp_server import create_mcp
 from .models import MAX_PAYLOAD_BYTES, BrokerError, JobInput, ListQuery
 from .store import Store
@@ -121,6 +123,8 @@ def create_app(
 ) -> Starlette:
     store = Store(db_path, lease_seconds=lease_seconds, max_attempts=max_attempts)
     broker = Broker(store, sweep_seconds=sweep_seconds)
+    launcher = Launcher(Path(db_path).parent / "runners")
+    model_catalog = ModelCatalog(launcher.cwd)
     mcp = create_mcp(broker)
     # Stateful SSE enables explicit MCP cancellation; application workers remain durable.
     mcp_app = mcp.streamable_http_app(
@@ -144,6 +148,18 @@ def create_app(
         # A real DB operation ensures the broker is ready to accept work.
         await broker.call("recover_expired")
         return JSONResponse({"ok": True, "version": __version__})
+
+    assets = Path(__file__).parent / "static"
+    dashboard_headers = {
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; "
+        "connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; "
+        "frame-ancestors 'none'; form-action 'self'",
+    }
+
+    async def dashboard(request):
+        return FileResponse(assets / "dashboard.html", headers=dashboard_headers)
 
     async def jobs(request: Request):
         if request.method == "POST":
@@ -176,6 +192,42 @@ def create_app(
 
     async def workers(request):
         return JSONResponse(await broker.workers())
+
+    async def stop_worker(request):
+        return JSONResponse(await broker.mutate("stop", request.path_params["worker_id"]))
+
+    async def models(request):
+        return JSONResponse(
+            await model_catalog.get(force=request.query_params.get("refresh") == "1"),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def runners(request):
+        import anyio
+
+        if request.method == "GET":
+            return JSONResponse(await anyio.to_thread.run_sync(launcher.list))
+        if (
+            request.headers.get("content-type", "").split(";")[0].strip().lower()
+            != "application/json"
+        ):
+            raise BrokerError("unsupported_media_type", "Use application/json", 415)
+        try:
+            payload = await request.json()
+        except (ValueError, UnicodeError, RecursionError):
+            raise BrokerError("invalid_json", "Request must contain valid JSON", 400) from None
+        launch = LaunchInput.model_validate(payload)
+        if launch.worker_id:
+            for worker in (await broker.workers())["workers"]:
+                if worker["worker_id"] == launch.worker_id and worker["state"] in {
+                    "waiting",
+                    "claimed",
+                }:
+                    raise BrokerError(
+                        "worker_running", "Stop this worker before launching it again"
+                    )
+        origin = str(request.base_url).rstrip("/")
+        return JSONResponse(await anyio.to_thread.run_sync(launcher.launch, launch, origin), 202)
 
     async def broker_error(request, exc):
         return JSONResponse({"error": {"code": exc.code, "message": exc.message}}, exc.status)
@@ -219,11 +271,17 @@ def create_app(
         return JSONResponse({"error": {"code": "internal_error", "message": "Internal error"}}, 500)
 
     routes = [
+        Route("/", dashboard),
+        Route("/dashboard", dashboard),
+        Mount("/assets", StaticFiles(directory=assets), name="assets"),
         Route("/v1/health", health),
         Route("/v1/jobs", jobs, methods=["GET", "POST"]),
         Route("/v1/jobs/{job_id}", job),
         Route("/v1/queues", queues),
         Route("/v1/workers", workers),
+        Route("/v1/workers/{worker_id}/stop", stop_worker, methods=["POST"]),
+        Route("/v1/runners", runners, methods=["GET", "POST"]),
+        Route("/v1/models", models),
     ]
     # Fixed routes prevent path input from selecting an arbitrary Store method.
     for name in ("cancel", "retry"):
@@ -248,4 +306,6 @@ def create_app(
     app.add_middleware(LocalOnly)
     app.state.broker = broker
     app.state.mcp = mcp
+    app.state.launcher = launcher
+    app.state.model_catalog = model_catalog
     return app

@@ -9,7 +9,7 @@ from pydantic import Field, JsonValue, ValidationError
 
 from . import __version__
 from .broker import Broker
-from .models import MAX_WAIT, BrokerError, Name, WorkerId, WorkerInput, WorkerWaitSeconds
+from .models import MAX_WAIT, BrokerError, ModelId, Name, WorkerId, WorkerInput, WorkerWaitSeconds
 
 WORKER_INSTRUCTIONS = """The user has authorized a reverse-MCP worker loop for the subscribed queues.
 Immediately call wait_for_job using next_action.arguments. The configured wait_seconds is
@@ -68,11 +68,14 @@ def create_mcp(broker: Broker) -> MCPServer:
         queues: Annotated[list[Name], Field(min_length=1, max_length=100)],
         worker_id: WorkerId | None = None,
         wait_seconds: WorkerWaitSeconds | None = None,
+        model: ModelId | None = None,
     ) -> dict[str, Any]:
         """Start/resume a worker. wait_seconds sets its saved idle wait (default/max 86400 = 24 hours)."""
-        request = WorkerInput(queues=queues, worker_id=worker_id, wait_seconds=wait_seconds)
+        request = WorkerInput(
+            queues=queues, worker_id=worker_id, wait_seconds=wait_seconds, model=model
+        )
         worker = await broker.mutate(
-            "start", request.queues, request.worker_id, request.wait_seconds
+            "start", request.queues, request.worker_id, request.wait_seconds, request.model
         )
         return {
             "status": "ready",

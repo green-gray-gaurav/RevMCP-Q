@@ -7,6 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints,
 
 Name = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")]
 WorkerId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")]
+ModelId = Annotated[
+    str, StringConstraints(min_length=1, max_length=200, pattern=r"^[^\s\x00-\x1f\x7f]+$")
+]
 JobStatus = Literal["queued", "processing", "completed", "failed", "cancelled"]
 ResultFormat = Literal["text", "json"]
 MAX_PAYLOAD_BYTES = 1_048_576
@@ -59,6 +62,7 @@ class WorkerInput(BaseModel):
     queues: list[Name] = Field(min_length=1, max_length=100)
     worker_id: WorkerId | None = None
     wait_seconds: WorkerWaitSeconds | None = None
+    model: ModelId | None = None
 
     @model_validator(mode="after")
     def normalize_queues(self):
@@ -73,3 +77,4 @@ class ListQuery(BaseModel):
     status: JobStatus | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
+    q: str | None = Field(default=None, max_length=200)

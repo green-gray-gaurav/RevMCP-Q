@@ -1,5 +1,221 @@
 # R-mcpq
 
+This checkout adds an **autonomous Codex worker**: applications enqueue tasks and the
+runner starts Codex turns automatically using your existing ChatGPT subscription sign-in.
+You no longer need to type a listener prompt into an AI session. The original HTTP/MCP
+broker and interactive worker mode are also available.
+
+## Local dashboard
+
+Start the broker, then open **http://127.0.0.1:8791/** (or the port you selected).
+The dashboard is also available at `/dashboard` and uses the same broker process.
+
+- View job totals, queue/status filters and paginated jobs, newest first.
+- Select a job to read/copy its text or JSON result, instruction, context and attempt history.
+- Submit jobs, cancel pending/processing work, and retry failed/cancelled jobs.
+- Inspect workers and their observed queue activity. The page refreshes every three seconds.
+
+Worker cards show their selected **Model**. Job details show **Model (last attempt)**, and
+attempt history preserves the model used for each claim even if the worker later changes
+models. The autonomous worker resolves `--model`, the effective Codex configuration, or
+the runtime default, then pins that model for its lifetime. Its `ready` log and `worker
+--check --json` also show the model. Interactive MCP workers can report `model` in `start`.
+Older workers and historical attempts show **Not reported** until model metadata is available.
+After updating, restart the broker for the automatic schema migration and restart workers
+to register their model; refresh the dashboard page to load the updated JavaScript.
+
+The dashboard loads no external scripts or services. After updating this checkout, restart
+an already-running broker with **Ctrl+C**, then run your `serve` command again to load it.
+
+### Dashboard controls
+
+- **Launch a Codex worker:** enter comma-separated queues, an optional unique worker ID,
+  choose a model from the dropdown, and select `workspace-write` or `read-only`. The broker launches the fixed
+  local `rmcpq worker` command using its Python environment and working directory. Install
+  `--extra codex` and sign in with ChatGPT first. Launch status and failures appear above
+  the worker cards; the actual model appears after registration.
+  The dropdown loads visible models from your signed-in Codex account when the form opens.
+  **Configured default** leaves selection to Codex configuration. **Refresh models** reloads
+  the catalog while preserving an available selection. Catalogs are cached for 60 seconds;
+  loading the list performs no model inference. If loading fails, the configured default
+  remains available and the form shows the sign-in/setup error.
+- **Stop worker:** stops its broker registration and releases unfinished claims. The
+  managed worker observes the stop and requests a turn interrupt. A running external action
+  may already have taken effect. This also works for workers started in another terminal.
+- **Configure another / Launch again:** prefill queues and model from an existing worker.
+  Use a unique ID for concurrent workers. Wait for a stopped dashboard process to exit before
+  reusing its ID. Stopped registrations are hidden until **Show stopped** is selected.
+- **Search and queue cards:** search all jobs by ID, queue or instruction; select a queue
+  card to filter. The cards show queued/processing work and observed waiting/busy workers.
+- **Select page:** cancel eligible queued/processing jobs or retry eligible failed/cancelled
+  jobs, with confirmation. Completed jobs are skipped. Operations are individual requests;
+  partial failures are reported and completed external work cannot be undone.
+- **Duplicate / edit:** copy a job into the submission form, edit it, and enqueue a new job.
+  **Download result** saves the answer as `.txt` or `.json`; **Copy job ID** copies its ID.
+- **Pause updates:** pauses only dashboard polling. Workers continue processing. Manual
+  Refresh still works, and **Resume updates** restores three-second polling.
+
+Dashboard launches are independent local worker processes with their own normal lease and
+reconnect behavior. The launch monitor is held by the current broker process; registrations
+and job history remain durable across broker restarts. A broker restart does not guarantee
+worker continuity. Use **Stop worker** before shutting down when you want a clean stop.
+Launch logs are under the broker database directory's `runners/` folder and contain worker
+status events/identifiers, not task contents or claim tokens. Launches are limited to 16
+concurrent dashboard processes. No arbitrary shell command or cwd can be submitted from the UI.
+
+Control endpoints use the same loopback Host/Origin checks:
+
+| Endpoint | Operation |
+| --- | --- |
+| `GET /v1/runners` | Dashboard launch status and broker working directory |
+| `GET /v1/models` | Visible Codex model catalog and configured default; `?refresh=1` reloads |
+| `POST /v1/runners` | Launch a worker with queues, optional worker ID/model and sandbox |
+| `POST /v1/workers/{worker_id}/stop` | Stop a registration and release unfinished claims |
+| `GET /v1/jobs?q=TEXT` | Search job ID, queue and instruction with the existing filters |
+
+## Autonomous Codex worker
+
+For a fresh installation, get this branch:
+
+```powershell
+git clone --branch codex-api-broker https://github.com/green-gray-gaurav/RevMCP-Q.git
+cd RevMCP-Q
+```
+
+Requires Python **3.11+**, **uv**, and a Codex-capable ChatGPT account. If the Codex CLI
+is not installed, install it with Node.js/npm:
+
+```powershell
+npm install -g @openai/codex
+```
+
+From the project folder, install the optional official Codex Python SDK and sign in
+with ChatGPT using the Codex CLI:
+
+```powershell
+uv sync --locked --extra codex
+codex login
+uv run --extra codex rmcpq worker --check --json
+```
+
+Start a broker in one terminal. Use port 8791 if your original broker already uses 8790:
+
+```powershell
+uv run --extra codex rmcpq serve --port 8791
+```
+
+Start the autonomous worker in a second terminal, from this folder:
+
+```powershell
+uv run --extra codex rmcpq worker --url http://127.0.0.1:8791 --queue summaries --queue extraction
+```
+
+Submit a task from a third terminal:
+
+```powershell
+uv run --extra codex rmcpq enqueue --url http://127.0.0.1:8791 --queue summaries --instruction "Explain reverse MCP in two sentences."
+uv run --extra codex rmcpq wait --url http://127.0.0.1:8791 JOB_ID --timeout 180
+```
+
+The runner waits in Python and invokes Codex only when a job arrives. Each independent job
+gets a fresh managed Codex thread. Authentication and inference remain inside the official
+Codex runtime. The runner requires account type `chatgpt`, forces ChatGPT login and the built-in
+OpenAI provider, blanks inherited API credentials for its child process, and rejects custom
+OpenAI provider/endpoint overrides. It never reads authentication files or extracts tokens.
+Subscription access and usage limits still apply.
+
+| Option | Behavior |
+| --- | --- |
+| `--queue NAME` | Subscribe to a queue; repeat for more queues |
+| `--worker-id NAME` | Stable registration, default `codex-worker`; use a different ID per concurrent runner |
+| `--cwd PATH` | Job working directory; defaults to the directory you launch from |
+| `--model MODEL` | Optional model supported by your Codex account; otherwise use the host configuration |
+| `--sandbox read-only` | Disable workspace writes; default is `workspace-write` |
+| `--wait-seconds 25` | Duration of each Python queue wait, up to 300 seconds; the runner continues indefinitely |
+| `--job-timeout 3600` | Maximum seconds per job, including recovery |
+| `--max-jobs N` | Exit after processing N claims, including failed/cancelled claims |
+| `--state-dir PATH` | Execution journals, default `~/.rmcpq/workers`; keep this directory for recovery |
+| `--check` | Verify subscription authentication without contacting the broker or claiming work |
+| `--json` | Emit JSON events with identifiers and status, without task contents or tokens |
+
+Press **Ctrl+C** to interrupt the managed turn, stop the worker and release unfinished work.
+Producer cancellation or MCP `stop` is checked while reasoning and triggers a turn interrupt.
+The runner renews the lease while the model works. It uses `never` approval policy, so a job
+that needs additional host permission cannot get that permission automatically.
+
+### Execution outcomes and generated files
+
+The autonomous Codex worker uses an internal outcome envelope. It unwraps successful
+answers into the producer's requested text or native JSON result. Reported execution
+failure calls `fail_job`: the job becomes `failed`, its result remains empty, and its
+reason appears in the dashboard's **Error** section. Invalid envelopes also fail the job.
+An application result's own `status` or `error` keys do not control broker status.
+
+```json
+{"outcome":"success","result":{"filepath":"C:/output/image.png"},"error":null,"artifacts":["C:/output/image.png"]}
+```
+
+```json
+{"outcome":"failure","result":null,"error":"Image generation tool refused the request.","artifacts":[]}
+```
+
+For generated images, videos, or other files, Codex is instructed to report success only
+after creating the requested output, list its absolute paths in `artifacts`, and include
+the paths in the result. Every reported artifact is checked for an existing, nonempty
+file. This checks file presence, not media correctness or whether the answer satisfies
+every requirement; producer-specific validation remains the producer's responsibility.
+The broker cannot infer success from arbitrary application content or discover unreported files.
+
+Built-in image generation saves into Codex's `generated_images/<thread-id>/` directory.
+The autonomous worker receives that exact thread directory and is instructed to preserve
+the image-tool response using its documented helper, then report the real generated path.
+The runner copies reported source images into the job workspace and rewrites their paths
+in the returned result. It does not scan other sessions or guess from a blank tool response.
+The model must leave the image copy to the runner to avoid Windows sandbox ownership issues.
+
+For example, use this context with an images job:
+
+```json
+{"filepath":"C:/Users/Imart/Desktop/projects/rmcpq-neo-v1/output"}
+```
+
+`filepath` can be an output directory or a filename matching the generated image's extension.
+It must stay within `--cwd`. The worker must use `--sandbox workspace-write` (the default).
+Without `filepath`, images are saved in cwd. Existing files receive a versioned sibling;
+the broker never overwrites them. Read-only workers cannot copy generated images into a workspace.
+
+Restart an existing worker to enable this contract. Old completed jobs retain their original
+history; enqueue a new job to run them again. In-flight journals from the previous contract
+cannot be reused as successful outcomes; the worker releases that claim and asks for a restart
+to begin a fresh attempt under the new contract. Interactive MCP workers still explicitly
+choose between `submit_result` and `fail_job`.
+
+Execution journals record thread/turn IDs and completed results before queue submission.
+Restart with the same broker URL, worker ID, state directory, cwd, model and sandbox to
+recover an unexpired claim. A finished result can be resubmitted without another model call;
+a recorded running turn is inspected instead of blindly starting another one. Missing or
+ambiguous turn history fails the job for operator inspection. Do not delete journals while
+claims are active. Changing the journal directory loses this recovery evidence.
+
+OS locks prevent duplicate local runners with the same broker URL and worker ID, including
+runners launched from different folders. Register a separate ID for each additional worker.
+Abrupt termination releases the OS lock; the durable registration can remain until restarted
+or explicitly stopped. Once a lease expires, a new attempt may repeat external side effects.
+Cancellation and interrupt requests cannot undo work already performed.
+
+The worker manages its own Codex threads; it does not attach to an arbitrary open IDE chat.
+Its tools come from the local Codex runtime/configuration and may differ from this chat.
+Image/video generation requires an available host tool; the queue itself generates no media.
+Journals contain results, and Codex stores its own thread history: protect both as local user data.
+With `uv run`, retain `--extra codex` for commands in this checkout so uv keeps the optional runtime installed.
+
+Implementation uses the [official Codex Python SDK](https://learn.chatgpt.com/docs/codex-sdk)
+and [Codex subscription authentication](https://learn.chatgpt.com/docs/auth). The SDK controls
+the local app-server over stdio. Changing MCP to WebSocket would not by itself start a model
+turn; the runner supplies that missing orchestration.
+
+The sections below describe the original interactive MCP mode and producer contracts.
+
 A durable **local reverse-MCP queue** for sending application tasks to active AI sessions.
 
 Applications submit self-contained jobs over HTTP. An AI host calls an MCP tool to wait for
@@ -180,9 +396,9 @@ Job statuses: `queued`, `processing`, `completed`, `failed`, `cancelled`. A comp
 have a valid JSON `null` result; inspect `status` instead of using `result != null`.
 
 Public jobs include `id`, `queue`, `instruction`, `context`, `result_format`, `status`, `result`,
-`error`, `worker_id`, `attempts`, `attempts_in_run`, `run`, `max_attempts`, and UTC timestamps
+`error`, `worker_id`, `model` (last attempt), `attempts`, `attempts_in_run`, `run`, `max_attempts`, and UTC timestamps
 `created_at`, `updated_at`, `finished_at`, `lease_until`. Detail responses also include
-`history`: attempt number, run, worker, status, start/end time, lease deadline, and error.
+`history`: attempt number, run, worker, model, status, start/end time, lease deadline, and error.
 Claim tokens are never included in producer responses or history.
 
 Text results must be strings. JSON results are native JSON values, including arrays and scalars;
@@ -206,7 +422,7 @@ worker identities and queue ownership are persisted independently.
 
 | Tool | Arguments and behavior |
 | --- | --- |
-| `start` | `queues`, optional `worker_id`, optional `wait_seconds` (>0–86400, new-worker default 86400); returns instructions, registration, and first `next_action` |
+| `start` | `queues`, optional `worker_id`, optional reported `model`, optional `wait_seconds` (>0–86400, new-worker default 86400); returns instructions, registration, and first `next_action` |
 | `wait_for_job` | `worker_id`, optional `wait_seconds` (0–86400; omitted uses the worker's saved preference); returns `job`, `idle`, or `stopped` |
 | `submit_result` | `job_id`, `claim_token`, native `result`; persists result and returns next wait action |
 | `renew_job` | `job_id`, `claim_token`; extends the current claim |
@@ -316,5 +532,6 @@ Tests use temporary databases, real loopback HTTP servers, official MCP clients,
 subprocesses. They do not use a real model or modify Bench. See
 [docs/verification.md](docs/verification.md) for the recorded verification scope.
 
-V1 excludes binary artifacts, dashboards, persistent conversations, capability scheduling,
-webhooks, user/queue authorization, model API execution, and distributed deployment.
+Binary artifact upload/download APIs, conversation reuse across jobs, capability scheduling,
+webhooks, user/queue authorization, direct model API execution, and distributed deployment
+remain outside this version's scope.

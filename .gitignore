@@ -9,3 +9,5 @@ data/
 dist/
 *.egg-info/
 .env
+.playwright-cli/
+output/playwright/

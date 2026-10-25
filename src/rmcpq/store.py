@@ -66,7 +66,7 @@ class Store:
         try:
             db.execute("PRAGMA journal_mode=WAL")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise RuntimeError(f"Unsupported database schema version: {version}")
             db.executescript("""
                 BEGIN IMMEDIATE;
@@ -102,7 +102,11 @@ class Store:
             if version < 2:
                 db.execute(f"""ALTER TABLE workers ADD COLUMN wait_seconds REAL NOT NULL
                                DEFAULT {DEFAULT_WAIT} CHECK(wait_seconds>0 AND wait_seconds<={MAX_WAIT})""")
-            db.execute("PRAGMA user_version=2")
+            if version < 3:
+                db.execute("ALTER TABLE workers ADD COLUMN model TEXT")
+                db.execute("ALTER TABLE jobs ADD COLUMN model TEXT")
+                db.execute("ALTER TABLE attempts ADD COLUMN model TEXT")
+            db.execute("PRAGMA user_version=3")
             db.execute("COMMIT")
         except BaseException:
             if db.in_transaction:
@@ -137,6 +141,7 @@ class Store:
             "run",
             "max_attempts",
             "worker_id",
+            "model",
         )
         data = {key: row[key] for key in keys}
         data.update(
@@ -150,6 +155,7 @@ class Store:
     def _public_worker(self, row):
         return {
             "worker_id": row["id"],
+            "model": row["model"],
             "queues": json.loads(row["queues"]),
             "running": bool(row["running"]),
             "generation": row["generation"],
@@ -230,7 +236,7 @@ class Store:
             self._recover(db, self.clock())
             data = self._public_job(self._job(db, job_id))
             rows = db.execute(
-                """SELECT number,run,worker_id,status,started_at,lease_until,ended_at,error
+                """SELECT number,run,worker_id,status,started_at,lease_until,ended_at,error,model
                                  FROM attempts WHERE job_id=? ORDER BY number""",
                 (job_id,),
             ).fetchall()
@@ -242,12 +248,17 @@ class Store:
                 data["history"].append(attempt)
             return data
 
-    def list_jobs(self, *, queue=None, status=None, limit=100, offset=0):
+    def list_jobs(self, *, queue=None, status=None, limit=100, offset=0, q=None):
         clauses, args = [], []
         for key, value in (("queue", queue), ("status", status)):
             if value is not None:
                 clauses.append(f"{key}=?")
                 args.append(value)
+        if q and q.strip():
+            clauses.append(
+                "(instr(lower(id),lower(?))>0 OR instr(lower(instruction),lower(?))>0 OR instr(lower(queue),lower(?))>0)"
+            )
+            args.extend([q.strip()] * 3)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._tx() as db:
             self._recover(db, self.clock())
@@ -264,7 +275,11 @@ class Store:
             }
 
     def start(
-        self, queues: list[str], worker_id: str | None = None, wait_seconds: float | None = None
+        self,
+        queues: list[str],
+        worker_id: str | None = None,
+        wait_seconds: float | None = None,
+        model: str | None = None,
     ):
         if wait_seconds is not None and (
             not math.isfinite(wait_seconds) or not 0 < wait_seconds <= MAX_WAIT
@@ -280,6 +295,9 @@ class Store:
             now = self.clock()
             self._recover(db, now)
             old = db.execute("SELECT * FROM workers WHERE id=?", (worker_id,)).fetchone()
+            selected_model = (
+                model if model is not None else (old["model"] if old and old["running"] else None)
+            )
             selected_wait = (
                 wait_seconds
                 if wait_seconds is not None
@@ -291,20 +309,20 @@ class Store:
                         "worker_scope_conflict", "Stop the worker before changing queues"
                     )
                 db.execute(
-                    "UPDATE workers SET seen_at=?,wait_seconds=? WHERE id=?",
-                    (now, selected_wait, worker_id),
+                    "UPDATE workers SET seen_at=?,wait_seconds=?,model=? WHERE id=?",
+                    (now, selected_wait, selected_model, worker_id),
                 )
             elif old:
                 db.execute(
-                    """UPDATE workers SET queues=?,running=1,generation=generation+1,seen_at=?,wait_seconds=?
+                    """UPDATE workers SET queues=?,running=1,generation=generation+1,seen_at=?,wait_seconds=?,model=?
                               WHERE id=?""",
-                    (queues_json, now, selected_wait, worker_id),
+                    (queues_json, now, selected_wait, selected_model, worker_id),
                 )
             else:
                 db.execute(
-                    """INSERT INTO workers(id,queues,running,generation,created_at,seen_at,wait_seconds)
-                       VALUES(?,?,1,1,?,?,?)""",
-                    (worker_id, queues_json, now, now, selected_wait),
+                    """INSERT INTO workers(id,queues,running,generation,created_at,seen_at,wait_seconds,model)
+                       VALUES(?,?,1,1,?,?,?,?)""",
+                    (worker_id, queues_json, now, now, selected_wait, selected_model),
                 )
             return self._public_worker(self._worker(db, worker_id))
 
@@ -337,12 +355,22 @@ class Store:
                     db.execute(
                         """UPDATE jobs SET status='processing',worker_id=?,claim_token=?,
                                   lease_until=?,attempts=?,attempts_in_run=attempts_in_run+1,
-                                  updated_at=? WHERE id=?""",
-                        (worker_id, token, until, number, now, active["id"]),
+                                  updated_at=?,model=? WHERE id=?""",
+                        (worker_id, token, until, number, now, worker["model"], active["id"]),
                     )
                     db.execute(
-                        "INSERT INTO attempts VALUES(?,?,?,?,?,'processing',?,?,NULL,NULL)",
-                        (active["id"], number, active["run"], worker_id, token, now, until),
+                        """INSERT INTO attempts(job_id,number,run,worker_id,claim_token,status,
+                           started_at,lease_until,model) VALUES(?,?,?,?,?,'processing',?,?,?)""",
+                        (
+                            active["id"],
+                            number,
+                            active["run"],
+                            worker_id,
+                            token,
+                            now,
+                            until,
+                            worker["model"],
+                        ),
                     )
                     active = self._job(db, active["id"])
             db.execute("UPDATE workers SET seen_at=? WHERE id=?", (now, worker_id))

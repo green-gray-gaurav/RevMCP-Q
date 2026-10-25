@@ -1,6 +1,7 @@
 """Producer CLI and loopback-only broker launcher."""
 
 import argparse
+import asyncio
 import json
 import math
 import os
@@ -68,6 +69,27 @@ def parser():
             command.add_argument("--poll-interval", type=positive, default=1)
     for name in ("queues", "workers"):
         common(commands.add_parser(name))
+    worker = commands.add_parser(
+        "worker", help="Run an autonomous subscription-backed Codex worker"
+    )
+    common(worker)
+    worker.add_argument("--host", choices=["codex"], default="codex")
+    worker.add_argument(
+        "--queue", action="append", default=[], help="Queue to subscribe to (repeatable)"
+    )
+    worker.add_argument("--worker-id", default="codex-worker")
+    worker.add_argument("--cwd", type=Path, default=Path.cwd())
+    worker.add_argument("--state-dir", type=Path, default=Path.home() / ".rmcpq" / "workers")
+    worker.add_argument("--model", help="Optional Codex model; defaults to the host configuration")
+    worker.add_argument(
+        "--sandbox", choices=["read-only", "workspace-write"], default="workspace-write"
+    )
+    worker.add_argument("--wait-seconds", type=positive, default=25)
+    worker.add_argument("--job-timeout", type=positive, default=3600)
+    worker.add_argument("--max-jobs", type=int, help="Stop after this many claimed jobs")
+    worker.add_argument(
+        "--check", action="store_true", help="Verify subscription sign-in without claiming jobs"
+    )
     return root
 
 
@@ -156,6 +178,12 @@ def main(argv=None):
             app = create_app(
                 args.db, lease_seconds=args.lease_seconds, max_attempts=args.max_attempts
             )
+            host = f"[{args.host}]" if ":" in args.host else args.host
+            dashboard_url = f"http://{host}:{args.port}/"
+            if args.json:
+                print(json.dumps({"event": "starting", "dashboard": dashboard_url}), flush=True)
+            else:
+                print(f"Starting R-mcpq. Dashboard: {dashboard_url}", flush=True)
             uvicorn.run(
                 app,
                 host=args.host,
@@ -166,6 +194,39 @@ def main(argv=None):
             )
             return 0
         url = (args.url or os.environ.get("RMCPQ_URL", "http://127.0.0.1:8790")).rstrip("/")
+        if args.command == "worker":
+            from .worker import WorkerError, WorkerOptions, run_worker
+
+            options = WorkerOptions(
+                url=url,
+                queues=args.queue,
+                worker_id=args.worker_id,
+                cwd=args.cwd,
+                state_dir=args.state_dir,
+                model=args.model,
+                sandbox=args.sandbox,
+                wait_seconds=args.wait_seconds,
+                job_timeout=args.job_timeout,
+                max_jobs=args.max_jobs,
+                check=args.check,
+            )
+
+            def emit(event):
+                if args.json:
+                    print(json.dumps(event, ensure_ascii=False), flush=True)
+                else:
+                    details = " ".join(f"{k}={v}" for k, v in event.items() if k != "event")
+                    print(f"{event['event']} {details}", flush=True)
+
+            try:
+                asyncio.run(run_worker(options, emit))
+                return 0
+            except WorkerError as exc:
+                if args.json:
+                    display({"error": {"code": exc.code, "message": exc.message}}, True)
+                else:
+                    print(f"{exc.code}: {exc.message}", file=sys.stderr)
+                return 2
         with httpx.Client(base_url=url, timeout=10, trust_env=False) as client:
             if args.command == "enqueue":
                 uses_stdin = args.instruction is None and args.instruction_file in (None, "-")

@@ -228,6 +228,8 @@ def test_v1_database_migration_preserves_claims_and_history(store, clock):
     # Recreate the previous worker table shape and schema version on real persisted data.
     with sqlite3.connect(store.path) as db:
         db.execute("ALTER TABLE workers DROP COLUMN wait_seconds")
+        for table in ("workers", "jobs", "attempts"):
+            db.execute(f"ALTER TABLE {table} DROP COLUMN model")
         db.execute("PRAGMA user_version=1")
     reopened = Store(store.path, clock=clock)
     reopened.initialize()
@@ -237,7 +239,40 @@ def test_v1_database_migration_preserves_claims_and_history(store, clock):
     assert claim(reopened)["claim_token"] == active["claim_token"]
     reopened.initialize()  # Migration is safe to run again.
     with sqlite3.connect(store.path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_v2_migration_retains_jobs_and_unknown_historical_model(store, clock):
+    job = enqueue(store)
+    active = claim(store)
+    with sqlite3.connect(store.path) as db:
+        for table in ("workers", "jobs", "attempts"):
+            db.execute(f"ALTER TABLE {table} DROP COLUMN model")
+        db.execute("PRAGMA user_version=2")
+    reopened = Store(store.path, clock=clock)
+    reopened.initialize()
+    assert reopened.get_job(job["id"])["model"] is None
+    assert reopened.get_job(job["id"])["history"][0]["model"] is None
+    assert claim(reopened)["claim_token"] == active["claim_token"]
+    reopened.initialize()
+
+
+def test_model_snapshot_survives_worker_model_changes_and_retry(store):
+    job = enqueue(store)
+    registration = store.start(["a"], "model-worker", model="model-one")
+    active = store.claim("model-worker", registration["generation"])["job"]
+    assert active["model"] == "model-one"
+    store.fail(job["id"], active["claim_token"], "Failure")
+    store.start(["a"], "model-worker", model="model-two")
+    assert store.get_job(job["id"])["model"] == "model-one"
+    assert store.get_job(job["id"])["history"][0]["model"] == "model-one"
+    store.retry(job["id"])
+    store.claim("model-worker", registration["generation"])
+    assert store.get_job(job["id"])["model"] == "model-two"
+    assert [a["model"] for a in store.get_job(job["id"])["history"]] == ["model-one", "model-two"]
+    assert store.list_workers()["workers"][0]["model"] == "model-two"
+    store.stop("model-worker")
+    assert store.start(["a"], "model-worker")["model"] is None
 
 
 @pytest.mark.parametrize("duration", [0, -1, 86401, float("inf"), float("nan")])

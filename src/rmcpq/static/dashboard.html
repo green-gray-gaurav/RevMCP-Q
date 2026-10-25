@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>R-mcpq · Queue dashboard</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/dashboard.css">
+  <link rel="stylesheet" href="/assets/dashboard-controls.css">
+  <link rel="stylesheet" href="/assets/model-select.css">
+  <script src="/assets/dashboard.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <a class="brand" href="/" aria-label="R-mcpq dashboard"><span class="mark">↗</span> R-mcpq<span class="edition">LOCAL / 01</span></a>
+      <div class="connection"><span id="connection" class="badge">Connecting</span><span id="updated">Auto-refresh · 3s</span><button id="pause" class="quiet" aria-pressed="false">Pause updates</button><button id="refresh" class="quiet">Refresh</button></div>
+    </header>
+    <section class="intro"><div><p class="eyebrow">YOUR AI INBOX</p><h1>Work in.<br><span>Answers out.</span></h1><p class="subtitle">Follow every job from queue to result.</p></div><div class="intro-note">APPLICATION → QUEUE → CODEX<br><span>One local place to see what’s happening.</span></div></section>
+    <div id="error" class="error" role="alert" hidden></div>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <section class="metrics" aria-label="Job totals">
+      <div class="metric"><span>Queued</span><strong id="count-queued">—</strong><small>Ready for a worker</small></div>
+      <div class="metric"><span>Processing</span><strong id="count-processing">—</strong><small>Currently claimed</small></div>
+      <div class="metric"><span>Completed</span><strong id="count-completed">—</strong><small>Results saved</small></div>
+      <div class="metric"><span>Failed / cancelled</span><strong id="count-ended">—</strong><small>Review or retry</small></div>
+    </section>
+    <section class="queue-section" aria-label="Queue activity"><div class="section-heading"><h2>Queue activity</h2><span class="muted">Select a queue to inspect its jobs</span></div><div id="queue-overview" class="queue-overview"><p class="muted">Loading queues…</p></div></section>
+    <details class="compose worker-compose" id="launch-compose"><summary>+ Launch a Codex worker</summary><form id="launch-worker">
+      <div class="form-row"><label>Worker ID<input name="worker_id" maxlength="120" placeholder="images-worker (optional)"></label><label>Queues<input name="queues" required placeholder="images, summaries"></label></div>
+      <div class="form-row"><label>Model<select name="model" id="model-select" aria-describedby="model-status"><option value="">Configured default</option></select></label><label>Sandbox<select name="sandbox"><option value="workspace-write">Workspace write</option><option value="read-only">Read only</option></select></label></div>
+      <div class="model-catalog-row"><span id="model-status" class="muted" role="status">Models load from your signed-in Codex account when this form opens.</span><button type="button" id="refresh-models" class="quiet">Refresh models</button></div>
+      <p class="muted launch-help">Uses your existing Codex subscription sign-in. Working directory: <code id="runner-cwd">broker working directory</code>. One job at a time per worker.</p>
+      <div class="form-actions"><span class="muted">Choose a unique worker ID for each concurrent worker.</span><button type="submit" class="primary">Launch worker ↗</button></div>
+    </form></details>
+    <details class="compose" id="compose"><summary>+ Submit a job</summary><form id="enqueue">
+      <div class="form-row"><label>Queue<input name="queue" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*" placeholder="summaries"></label><label>Result format<select name="result_format"><option value="text">Text</option><option value="json">JSON</option></select></label></div>
+      <label>Instruction<textarea name="instruction" required rows="3" placeholder="What should the worker do?"></textarea></label>
+      <label>Context <span class="muted">optional JSON</span><textarea name="context" rows="2" placeholder='{"text": "Your input here"}'></textarea></label>
+      <div class="form-actions"><span class="muted">A worker subscribed to this queue must be running.</span><button type="submit" class="primary">Enqueue job ↗</button></div>
+    </form></details>
+    <section class="workspace">
+      <div class="panel jobs-panel">
+        <div class="panel-heading"><h2>Jobs <span id="job-total" class="muted"></span></h2><span class="muted">Newest first</span></div>
+        <div class="filters"><label>Queue<select id="queue-filter"><option value="">All queues</option></select></label><label>Status<select id="status-filter"><option value="">All statuses</option><option>queued</option><option>processing</option><option>completed</option><option>failed</option><option>cancelled</option></select></label></div>
+        <div class="search-row"><input id="search" type="search" maxlength="200" placeholder="Search all jobs by ID, queue or instruction" aria-label="Search jobs"><button id="clear-filters" class="quiet">Clear filters</button></div>
+        <div class="bulk-bar"><label class="inline-label"><input id="select-page" type="checkbox"> Select page</label><span id="selected-count" class="muted">0 selected</span><button id="bulk-cancel" disabled>Cancel selected</button><button id="bulk-retry" disabled>Retry selected</button></div>
+        <div id="jobs" class="job-list" aria-label="Jobs"><p class="empty">Loading jobs…</p></div>
+        <div class="pagination"><button id="newer" class="quiet" disabled>← Newer</button><span id="page-label" class="muted"></span><button id="older" class="quiet" disabled>Older →</button></div>
+      </div>
+      <aside class="panel detail-panel" aria-label="Selected job"><div class="panel-heading"><h2>Job details</h2><span id="detail-status"></span></div><div id="detail"><div class="empty detail-empty"><span class="empty-icon">↖</span><h3>Select a job</h3><p>Its instruction, result, and attempt history will appear here.</p></div></div></aside>
+    </section>
+    <section class="panel workers-panel"><div class="panel-heading"><h2>Workers <span id="worker-total" class="muted"></span></h2><label class="inline-label muted"><input type="checkbox" id="show-stopped"> Show stopped</label></div><div id="runners" class="runner-notices"></div><div id="workers" class="worker-grid"><p class="empty">Loading workers…</p></div><p class="presence-note">Stop releases unfinished claims and requests a model interrupt; completed external actions cannot be undone. Waiting means an outstanding queue request; claimed means an active lease. Neither confirms model connectivity.</p></section>
+    <footer><span>R-mcpq / local queue dashboard</span><span>Task data stays on this broker. No external dashboard services.</span></footer>
+  </main>
+</body>
+</html>
