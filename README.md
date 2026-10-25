@@ -78,12 +78,12 @@ instead of adding a duplicate.
 ```toml
 [mcp_servers.rmcpq]
 url = "http://127.0.0.1:8790/mcp"
-tool_timeout_sec = 360
+tool_timeout_sec = 86460
 ```
 
 Restart Codex after saving. The CLI and IDE extension share this configuration. Check the
 registration with `codex mcp list`, then use the [worker startup prompt](#start-a-worker).
-The timeout is in **seconds** and leaves room for R-mcpq's maximum 300-second wait.
+The timeout is in **seconds**: 24 hours plus a one-minute margin for the broker's idle wait.
 See the [official Codex MCP documentation](https://developers.openai.com/codex/mcp/).
 
 ### Claude Code
@@ -97,7 +97,7 @@ Keep any other entries in `mcpServers`.
     "rmcpq": {
       "type": "http",
       "url": "http://127.0.0.1:8790/mcp",
-      "timeout": 360000
+      "timeout": 86460000
     }
   }
 }
@@ -113,14 +113,14 @@ Alternatively, register the HTTP endpoint with the CLI:
 claude mcp add --transport http --scope project rmcpq http://127.0.0.1:8790/mcp
 ```
 
-This creates the project entry; add `"timeout": 360000` to it afterward. Choose either the
+This creates the project entry; add `"timeout": 86460000` to it afterward. Choose either the
 manual configuration or the registration command so you do not add the same server twice.
 
 ### Start a worker
 
 Once either client has loaded the server, send this prompt in its active AI session:
 
-> Use the rmcpq MCP server. Call start with queues ["summaries", "extraction"]. Follow the
+> Use the rmcpq MCP server. Call start with queues ["summaries", "extraction"] and wait_seconds 86400. Follow the
 > returned instructions and next_action: wait for jobs, submit results, and wait again.
 > Continue after idle timeouts until I say stop or the host cannot continue.
 
@@ -128,6 +128,15 @@ Once either client has loaded the server, send this prompt in its active AI sess
 provide that ID again with the same queue subscriptions. Use distinct worker IDs for Codex,
 Claude Code, and any additional sessions. Each session processes one job at a time; start more
 workers for concurrency. Client configuration registers the tools; the prompt starts the loop.
+
+The default idle wait is **24 hours (86,400 seconds)**. A new job wakes it immediately; it
+does not wait a full day before returning work. `start.wait_seconds` sets a worker's preferred
+wait duration and persists it across resumes and broker restarts. Every returned wait action
+uses that preference, including after an answer, failure, or idle response. You can override
+one call with `wait_for_job.wait_seconds`; `0` checks immediately without changing the saved
+preference. A 24-hour idle wait is not a 24-hour listener lifetime: the loop continues after
+jobs and idle responses until stopped. The host still controls session lifetime and permissions;
+raising a timeout does not guarantee uninterrupted 24-hour host operation.
 
 ## Producer HTTP API
 
@@ -197,8 +206,8 @@ worker identities and queue ownership are persisted independently.
 
 | Tool | Arguments and behavior |
 | --- | --- |
-| `start` | `queues`, optional `worker_id`; returns instructions, registration, and first `next_action` |
-| `wait_for_job` | `worker_id`, optional `wait_seconds` (0–300, default 25); returns `job`, `idle`, or `stopped` |
+| `start` | `queues`, optional `worker_id`, optional `wait_seconds` (>0–86400, new-worker default 86400); returns instructions, registration, and first `next_action` |
+| `wait_for_job` | `worker_id`, optional `wait_seconds` (0–86400; omitted uses the worker's saved preference); returns `job`, `idle`, or `stopped` |
 | `submit_result` | `job_id`, `claim_token`, native `result`; persists result and returns next wait action |
 | `renew_job` | `job_id`, `claim_token`; extends the current claim |
 | `fail_job` | `job_id`, `claim_token`, `error`; records terminal failure and returns next wait action |

@@ -2,16 +2,14 @@
 
 import asyncio
 import logging
+import math
 import sqlite3
 from functools import partial
 
 import anyio
 
-from .models import BrokerError
+from .models import DEFAULT_WAIT, MAX_WAIT, BrokerError
 from .store import Store
-
-DEFAULT_WAIT = 25
-MAX_WAIT = 300
 
 
 class Broker:
@@ -36,20 +34,25 @@ class Broker:
         finally:
             self.notify()
 
-    def next_wait(self, worker_id):
+    def next_wait(self, worker_id, wait_seconds=DEFAULT_WAIT):
         return {
             "tool": "wait_for_job",
-            "arguments": {"worker_id": worker_id, "wait_seconds": DEFAULT_WAIT},
+            "arguments": {"worker_id": worker_id, "wait_seconds": wait_seconds},
         }
 
     async def next_action(self, worker_id):
         worker = await self.call("worker", worker_id)
-        return self.next_wait(worker_id) if worker["running"] and not self.closing else None
+        return (
+            self.next_wait(worker_id, worker["wait_seconds"])
+            if worker["running"] and not self.closing
+            else None
+        )
 
-    async def wait(self, worker_id: str, wait_seconds: float = DEFAULT_WAIT):
-        if not 0 <= wait_seconds <= MAX_WAIT:
-            raise BrokerError("invalid_wait", "wait_seconds must be between 0 and 300", 422)
+    async def wait(self, worker_id: str, wait_seconds: float | None = None):
         worker = await self.call("worker", worker_id)
+        wait_seconds = worker["wait_seconds"] if wait_seconds is None else wait_seconds
+        if not math.isfinite(wait_seconds) or not 0 <= wait_seconds <= MAX_WAIT:
+            raise BrokerError("invalid_wait", f"wait_seconds must be between 0 and {MAX_WAIT}", 422)
         if worker_id in self.pending:
             raise BrokerError("wait_in_progress", "Only one outstanding wait is allowed per worker")
         self.pending.add(worker_id)
@@ -78,7 +81,7 @@ class Broker:
                     return {
                         "status": "idle",
                         "job": None,
-                        "next_action": self.next_wait(worker_id),
+                        "next_action": await self.next_action(worker_id),
                         "message": "No job yet. Follow next_action to continue listening.",
                     }
                 try:

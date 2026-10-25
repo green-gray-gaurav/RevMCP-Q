@@ -10,6 +10,9 @@ WorkerId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]
 JobStatus = Literal["queued", "processing", "completed", "failed", "cancelled"]
 ResultFormat = Literal["text", "json"]
 MAX_PAYLOAD_BYTES = 1_048_576
+DEFAULT_WAIT = 86_400
+MAX_WAIT = 86_400
+WorkerWaitSeconds = Annotated[float, Field(gt=0, le=MAX_WAIT, allow_inf_nan=False)]
 
 
 class BrokerError(Exception):
@@ -55,6 +58,7 @@ class WorkerInput(BaseModel):
 
     queues: list[Name] = Field(min_length=1, max_length=100)
     worker_id: WorkerId | None = None
+    wait_seconds: WorkerWaitSeconds | None = None
 
     @model_validator(mode="after")
     def normalize_queues(self):

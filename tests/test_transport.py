@@ -223,9 +223,70 @@ async def test_cancel_retry_failure_and_result_types_over_real_transports(server
         )
         assert failed["job"]["status"] == "failed" and failed["next_action"]
         invalid_wait = await worker.call_tool(
-            "wait_for_job", {"worker_id": "worker", "wait_seconds": 301}
+            "wait_for_job", {"worker_id": "worker", "wait_seconds": 86401}
         )
         assert invalid_wait.is_error
+
+
+async def test_24_hour_wait_survives_old_25_second_cutoff_and_repeats(server):
+    async with (
+        Client(server.url + "/mcp", read_timeout_seconds=40) as worker,
+        httpx.AsyncClient(base_url=server.url, trust_env=False) as producer,
+    ):
+        ready = await tool(
+            worker, "start", queues=["long-wait"], worker_id="day-worker", wait_seconds=86400
+        )
+        assert ready["wait_seconds"] == 86400
+        assert ready["next_action"]["arguments"]["wait_seconds"] == 86400
+        # Omit the override: the saved worker preference must control the actual request.
+        pending = asyncio.create_task(tool(worker, "wait_for_job", worker_id="day-worker"))
+        await asyncio.sleep(26)
+        assert not pending.done(), "A 24-hour wait ended at the former 25-second default"
+        response = await producer.post(
+            "/v1/jobs", json={"queue": "long-wait", "instruction": "Answer"}
+        )
+        assert response.status_code == 201
+        claimed = (await asyncio.wait_for(pending, 3))["job"]
+        assert claimed["id"] == response.json()["id"]
+        submitted = await tool(
+            worker,
+            "submit_result",
+            job_id=claimed["id"],
+            claim_token=claimed["claim_token"],
+            result="Ready",
+        )
+        assert submitted["next_action"]["arguments"]["wait_seconds"] == 86400
+        # Nonblocking probes must not replace the configured duration with zero.
+        idle = await tool(worker, "wait_for_job", worker_id="day-worker", wait_seconds=0)
+        assert idle["next_action"]["arguments"]["wait_seconds"] == 86400
+
+
+async def test_custom_wait_preserved_after_failures_idle_and_resume(server):
+    async with (
+        Client(server.url + "/mcp") as worker,
+        httpx.AsyncClient(base_url=server.url, trust_env=False) as producer,
+    ):
+        ready = await tool(worker, "start", queues=["custom"], worker_id="custom", wait_seconds=600)
+        assert ready["next_action"]["arguments"]["wait_seconds"] == 600
+        await producer.post("/v1/jobs", json={"queue": "custom", "instruction": "Answer"})
+        claimed = (await tool(worker, "wait_for_job", worker_id="custom", wait_seconds=0))["job"]
+        failed = await tool(
+            worker,
+            "fail_job",
+            job_id=claimed["id"],
+            claim_token=claimed["claim_token"],
+            error="Missing input",
+        )
+        assert failed["next_action"]["arguments"]["wait_seconds"] == 600
+        idle = await tool(worker, "wait_for_job", worker_id="custom", wait_seconds=0.01)
+        assert idle["next_action"]["arguments"]["wait_seconds"] == 600
+        resumed = await tool(worker, "start", queues=["custom"], worker_id="custom")
+        assert resumed["wait_seconds"] == 600
+        for duration in (0, -1, 86401):
+            invalid = await worker.call_tool(
+                "start", {"queues": ["custom"], "wait_seconds": duration}
+            )
+            assert invalid.is_error
 
 
 async def test_periodic_recovery_runs_without_queue_access(server_factory):

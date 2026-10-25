@@ -211,6 +211,42 @@ def test_worker_subscriptions_are_explicit_and_normalized():
         WorkerInput(queues=[])
 
 
+def test_wait_preference_persists_across_restarts_and_stop_resume(store, clock):
+    assert store.start(["a"], "default")["wait_seconds"] == 86400
+    assert store.start(["a"], "custom", wait_seconds=600)["wait_seconds"] == 600
+    reopened = Store(store.path, clock=clock)
+    reopened.initialize()
+    assert reopened.start(["a"], "custom")["wait_seconds"] == 600
+    reopened.stop("custom")
+    assert reopened.start(["a"], "custom")["wait_seconds"] == 600
+    assert reopened.start(["a"], "custom", wait_seconds=86400)["wait_seconds"] == 86400
+
+
+def test_v1_database_migration_preserves_claims_and_history(store, clock):
+    job = enqueue(store)
+    active = claim(store)
+    # Recreate the previous worker table shape and schema version on real persisted data.
+    with sqlite3.connect(store.path) as db:
+        db.execute("ALTER TABLE workers DROP COLUMN wait_seconds")
+        db.execute("PRAGMA user_version=1")
+    reopened = Store(store.path, clock=clock)
+    reopened.initialize()
+    assert reopened.worker("worker")["wait_seconds"] == 86400
+    saved = reopened.get_job(job["id"])
+    assert saved["status"] == "processing" and len(saved["history"]) == 1
+    assert claim(reopened)["claim_token"] == active["claim_token"]
+    reopened.initialize()  # Migration is safe to run again.
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("duration", [0, -1, 86401, float("inf"), float("nan")])
+def test_invalid_worker_wait_durations(store, duration):
+    with pytest.raises(ValidationError):
+        WorkerInput(queues=["a"], wait_seconds=duration)
+    assert_error("invalid_wait", lambda: store.start(["a"], wait_seconds=duration))
+
+
 def test_inspection_filters_and_queue_counts(store):
     a = enqueue(store)
     enqueue(store, "b")

@@ -130,7 +130,9 @@ def wait_job(client, job_id, timeout, poll_interval):
                 client, "GET", f"/v1/jobs/{job_id}", timeout=min(10, max(0.001, remaining))
             )
         except httpx.TimeoutException:
-            if time.monotonic() >= deadline:
+            # A request clipped to the caller's remaining budget can time out just
+            # before monotonic() reaches its deadline due to timer granularity.
+            if remaining <= 10:
                 raise WaitExpired(job) from None
             raise
         if job["status"] in ("completed", "failed", "cancelled"):

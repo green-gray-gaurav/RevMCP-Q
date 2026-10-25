@@ -2,13 +2,19 @@
 
 Verified on Windows with Python 3.11 and locked MCP SDK 2.3.0:
 
-- `pytest -q`: **41 passed**, including the two-producer/two-worker restart scenario.
+- `pytest -q`: **50 passed**, including the two-producer/two-worker restart scenario.
 - Ruff lint and formatting checks passed.
 - `uv lock --check --offline` passed.
 - `uv build --offline` produced a wheel and source distribution. Archive inspection confirmed
   that runtime databases, virtual environments, and caches are excluded.
 
 The automated suite exercises the broker's behavior without a model API or live AI session.
+
+- Long-wait coverage registers a worker with `wait_seconds=86400`, leaves a real MCP request
+  open for 26 seconds (past the former 25-second cutoff), then enqueues work and verifies it
+  wakes immediately. Subsequent answer, failure, and idle actions retain the saved preference.
+  The full 24-hour duration has not been soak-tested. Schema-v1 migration preserves existing
+  jobs, claims, and history while adding the worker wait preference.
 
 - Queue-core tests use temporary SQLite files and controlled clocks for expiry boundaries,
   exclusive concurrent claims, duplicate submissions, FIFO routing, scope, retries, history,

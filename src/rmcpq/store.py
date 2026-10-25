@@ -4,6 +4,7 @@ Call this synchronous class in a worker thread, never on an ASGI event loop.
 """
 
 import json
+import math
 import sqlite3
 import time
 from collections.abc import Callable, Iterator
@@ -13,7 +14,7 @@ from pathlib import Path
 from secrets import token_urlsafe
 from uuid import uuid4
 
-from .models import BrokerError, JobInput, canonical
+from .models import DEFAULT_WAIT, MAX_WAIT, BrokerError, JobInput, canonical
 
 
 def timestamp(value: float | None) -> str | None:
@@ -65,7 +66,7 @@ class Store:
         try:
             db.execute("PRAGMA journal_mode=WAL")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise RuntimeError(f"Unsupported database schema version: {version}")
             db.executescript("""
                 BEGIN IMMEDIATE;
@@ -97,9 +98,16 @@ class Store:
                 CREATE INDEX IF NOT EXISTS queue_claim ON jobs(status, queue, seq);
                 CREATE UNIQUE INDEX IF NOT EXISTS one_claim_per_worker
                     ON jobs(worker_id) WHERE status='processing';
-                PRAGMA user_version=1;
-                COMMIT;
             """)
+            if version < 2:
+                db.execute(f"""ALTER TABLE workers ADD COLUMN wait_seconds REAL NOT NULL
+                               DEFAULT {DEFAULT_WAIT} CHECK(wait_seconds>0 AND wait_seconds<={MAX_WAIT})""")
+            db.execute("PRAGMA user_version=2")
+            db.execute("COMMIT")
+        except BaseException:
+            if db.in_transaction:
+                db.execute("ROLLBACK")
+            raise
         finally:
             db.close()
         self.recover_expired()
@@ -147,6 +155,7 @@ class Store:
             "generation": row["generation"],
             "created_at": timestamp(row["created_at"]),
             "last_seen": timestamp(row["seen_at"]),
+            "wait_seconds": row["wait_seconds"],
         }
 
     def _end_attempt(self, db, row, outcome, reason, now):
@@ -254,28 +263,48 @@ class Store:
                 "offset": offset,
             }
 
-    def start(self, queues: list[str], worker_id: str | None = None):
+    def start(
+        self, queues: list[str], worker_id: str | None = None, wait_seconds: float | None = None
+    ):
+        if wait_seconds is not None and (
+            not math.isfinite(wait_seconds) or not 0 < wait_seconds <= MAX_WAIT
+        ):
+            raise BrokerError(
+                "invalid_wait",
+                f"Worker wait_seconds must be greater than 0 and at most {MAX_WAIT}",
+                422,
+            )
         worker_id = worker_id or "worker-" + str(uuid4())
         queues_json = canonical(sorted(set(queues)))
         with self._tx() as db:
             now = self.clock()
             self._recover(db, now)
             old = db.execute("SELECT * FROM workers WHERE id=?", (worker_id,)).fetchone()
+            selected_wait = (
+                wait_seconds
+                if wait_seconds is not None
+                else (old["wait_seconds"] if old else DEFAULT_WAIT)
+            )
             if old and old["running"]:
                 if old["queues"] != queues_json:
                     raise BrokerError(
                         "worker_scope_conflict", "Stop the worker before changing queues"
                     )
-                db.execute("UPDATE workers SET seen_at=? WHERE id=?", (now, worker_id))
+                db.execute(
+                    "UPDATE workers SET seen_at=?,wait_seconds=? WHERE id=?",
+                    (now, selected_wait, worker_id),
+                )
             elif old:
                 db.execute(
-                    """UPDATE workers SET queues=?,running=1,generation=generation+1,seen_at=?
+                    """UPDATE workers SET queues=?,running=1,generation=generation+1,seen_at=?,wait_seconds=?
                               WHERE id=?""",
-                    (queues_json, now, worker_id),
+                    (queues_json, now, selected_wait, worker_id),
                 )
             else:
                 db.execute(
-                    "INSERT INTO workers VALUES(?,?,1,1,?,?)", (worker_id, queues_json, now, now)
+                    """INSERT INTO workers(id,queues,running,generation,created_at,seen_at,wait_seconds)
+                       VALUES(?,?,1,1,?,?,?)""",
+                    (worker_id, queues_json, now, now, selected_wait),
                 )
             return self._public_worker(self._worker(db, worker_id))
 
