@@ -44,17 +44,8 @@ Run the command from this directory to use that data location consistently. Alte
 uv run rmcpq serve --port 8790 --db C:/path/to/rmcpq.sqlite
 ```
 
-Connect an MCP-capable AI host to **http://127.0.0.1:8790/mcp** using Streamable HTTP.
-Use a tool timeout above 25 seconds; if you increase `wait_seconds`, increase the host timeout
-as well. Give the active session this instruction:
-
-> Start R-mcpq by calling start with queues ["summaries", "extraction"]. Follow the returned
-> instructions and next_action: wait for jobs, submit results, and wait again. Continue after
-> idle timeouts until I say stop or the host cannot continue.
-
-`start` generates a worker ID if omitted. To resume the same identity after a lost connection,
-provide that ID again with the same queue subscriptions. Use distinct worker IDs for distinct
-AI sessions. Each host session processes one job at a time; start more workers for concurrency.
+Configure [Codex](#codex) or [Claude Code](#claude-code) using the MCP snippets below, then
+[start a worker](#start-a-worker). Keep the broker running in its terminal.
 
 Submit work from another terminal:
 
@@ -71,6 +62,72 @@ uv run rmcpq workers
 The CLI accepts `--url` and `--json` before or after the subcommand. `RMCPQ_URL` supplies the
 default URL for producers. `--instruction-file -` and `--context-file -` read stdin; only one
 input can use stdin. Files are read as UTF-8. JSON context can be any finite JSON value.
+
+## MCP client configuration
+
+Run the broker on the same machine as the AI client. Both configurations connect to
+**http://127.0.0.1:8790/mcp** using Streamable HTTP. Start `uv run rmcpq serve` before
+opening the client. If you change the broker port, update the URL in the client configuration.
+
+### Codex
+
+Add this block to `~/.codex/config.toml` (Windows: `%USERPROFILE%\.codex\config.toml`).
+Merge it with your existing configuration; update an existing `mcp_servers.rmcpq` block
+instead of adding a duplicate.
+
+```toml
+[mcp_servers.rmcpq]
+url = "http://127.0.0.1:8790/mcp"
+tool_timeout_sec = 360
+```
+
+Restart Codex after saving. The CLI and IDE extension share this configuration. Check the
+registration with `codex mcp list`, then use the [worker startup prompt](#start-a-worker).
+The timeout is in **seconds** and leaves room for R-mcpq's maximum 300-second wait.
+See the [official Codex MCP documentation](https://developers.openai.com/codex/mcp/).
+
+### Claude Code
+
+Create or merge this into `.mcp.json` at the root of the project where you run Claude Code.
+Keep any other entries in `mcpServers`.
+
+```json
+{
+  "mcpServers": {
+    "rmcpq": {
+      "type": "http",
+      "url": "http://127.0.0.1:8790/mcp",
+      "timeout": 360000
+    }
+  }
+}
+```
+
+Start or restart Claude Code in that project, approve the project MCP server when prompted,
+and run `/mcp` to inspect its status. The per-server timeout is in **milliseconds**.
+See the [official Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+
+Alternatively, register the HTTP endpoint with the CLI:
+
+```powershell
+claude mcp add --transport http --scope project rmcpq http://127.0.0.1:8790/mcp
+```
+
+This creates the project entry; add `"timeout": 360000` to it afterward. Choose either the
+manual configuration or the registration command so you do not add the same server twice.
+
+### Start a worker
+
+Once either client has loaded the server, send this prompt in its active AI session:
+
+> Use the rmcpq MCP server. Call start with queues ["summaries", "extraction"]. Follow the
+> returned instructions and next_action: wait for jobs, submit results, and wait again.
+> Continue after idle timeouts until I say stop or the host cannot continue.
+
+`start` generates a worker ID if omitted. To resume the same identity after a lost connection,
+provide that ID again with the same queue subscriptions. Use distinct worker IDs for Codex,
+Claude Code, and any additional sessions. Each session processes one job at a time; start more
+workers for concurrency. Client configuration registers the tools; the prompt starts the loop.
 
 ## Producer HTTP API
 
